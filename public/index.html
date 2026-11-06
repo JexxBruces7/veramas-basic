@@ -5299,7 +5299,7 @@ h+='<div class="ft">Perhitungan memakai data yang Anda isi dan asumsi di atas. B
             } catch (e) { $('lgErr').textContent = e.message; } finally { $('lgGo').disabled = false; }
         }
         $('lgGo').onclick = submitLogin; ['lgUser', 'lgPass', 'lgPass2', 'lgOld'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); }));
-        function lgForgot(e) { e.preventDefault(); $('lgErr').textContent = 'Reset kata sandi: tutup server, hapus file data/auth.json, lalu jalankan lagi dan buat akun baru. Bila akun diatur lewat .env, ubah LOGIN_PASSWORD di file itu.'; }
+        function lgForgot(e) { e.preventDefault(); $('lgErr').textContent = 'Reset kata sandi: tutup server, hapus file data/auth.json, lalu jalankan lagi dan buat akun baru. Bila akun diatur lewat .env, ubah LOGIN_USERS (atau LOGIN_PASSWORD) di pengaturan Environment/.env, lalu mulai ulang.'; }
         async function doLogout() { try { await api('/api/auth/logout', {}); } catch (e) { } location.reload(); }
         function disableLogin() {
             toggleAcct(false); const pw = prompt('Ketik kata sandi untuk menghapus login (dashboard terbuka lagi tanpa masuk):'); if (!pw) return;

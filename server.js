@@ -2372,8 +2372,13 @@ function cookieOf(req, k) { const m = new RegExp('(?:^|;\\s*)' + k + '=([^;]+)')
 function sessOf(req) { const t = cookieOf(req, 'tb_sess'), s = t && SESS.get(t); if (!s) return null; if (s.exp < Date.now()) { SESS.delete(t); return null; } return s; }
 function newSess(res, user) { const t = crypto.randomBytes(24).toString('hex'); SESS.set(t, { user, exp: Date.now() + 30 * 86400e3 }); res.setHeader('Set-Cookie', 'tb_sess=' + t + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=' + 30 * 86400); }
 if (E.LOGIN_USER && E.LOGIN_PASSWORD) { const _s = crypto.randomBytes(16).toString('hex'); AUTH = { user: String(E.LOGIN_USER), salt: _s, hash: pwHash(E.LOGIN_PASSWORD, _s), created: Date.now(), env: true }; } // akun tetap dari .env (opsional)
+const ACCTS = new Map(); // akun dari env: nama -> {salt, hash}
+{ const add = (u, p) => { u = String(u || '').trim(); p = String(p || '').trim(); if (!u || !p) return; const sl = crypto.randomBytes(16).toString('hex'); ACCTS.set(u, { salt: sl, hash: pwHash(p, sl) }); };
+  String(E.LOGIN_USERS || '').split(',').forEach(x => { const i = x.indexOf(':'); if (i > 0) add(x.slice(0, i), x.slice(i + 1)); });
+  if (E.LOGIN_USER && E.LOGIN_PASSWORD) add(E.LOGIN_USER, E.LOGIN_PASSWORD);
+  if (ACCTS.size) AUTH = { user: [...ACCTS.keys()][0], salt: '', hash: '', created: Date.now(), env: true }; }
 const userOk = u => /^[A-Za-z0-9._-]{3,32}$/.test(String(u || ''));
-function checkPw(user, pw) { if (!AUTH) return false; const h = pwHash(pw, AUTH.salt); return user === AUTH.user && crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(AUTH.hash, 'hex')); }
+function checkPw(user, pw) { if (ACCTS.size) { const a = ACCTS.get(String(user || '').trim()); if (!a) return false; return crypto.timingSafeEqual(Buffer.from(pwHash(pw, a.salt), 'hex'), Buffer.from(a.hash, 'hex')); } if (!AUTH) return false; const h = pwHash(pw, AUTH.salt); return user === AUTH.user && crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(AUTH.hash, 'hex')); }
 // file statis yang boleh dibuka tanpa login (layar login, aplikasi terpasang/PWA)
 const STATIC = { '/ind.js': 'application/javascript', '/i18n.js': 'application/javascript', '/sw.js': 'application/javascript', '/manifest.webmanifest': 'application/manifest+json', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/icon-maskable.png': 'image/png' };
 const srv = http.createServer(async (req, res) => {
@@ -2383,7 +2388,7 @@ const srv = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); return fs.createReadStream(path.join(PUB, 'index.html')).pipe(res); }
     if (req.method === 'GET' && STATIC[u.pathname]) { const f = path.join(PUB, u.pathname.slice(1)); if (!fs.existsSync(f)) return send(res, 404, { error: 'Tidak ada' }); res.writeHead(200, { 'Content-Type': STATIC[u.pathname] + (/javascript|json/.test(STATIC[u.pathname]) ? '; charset=utf-8' : ''), 'Cache-Control': u.pathname === '/sw.js' ? 'no-cache' : 'no-store', ...(u.pathname === '/sw.js' ? { 'Service-Worker-Allowed': '/' } : {}) }); return fs.createReadStream(f).pipe(res); }
     // ---- login ----
-    if (u.pathname === '/api/auth/status' && req.method === 'GET') { const se = sessOf(req); return send(res, 200, { enabled: !!AUTH, user: se ? se.user : null, name: AUTH ? AUTH.user : null }); }
+    if (u.pathname === '/api/auth/status' && req.method === 'GET') { const se = sessOf(req); return send(res, 200, { enabled: !!AUTH, user: se ? se.user : null, name: AUTH && !(ACCTS.size > 1) ? AUTH.user : null }); }
     if (u.pathname.startsWith('/api/auth/') && req.method === 'POST') {
       if (req.headers['x-tradebot'] !== '1') return send(res, 403, { error: 'Ditolak' });
       const b = await readBody(req), a = u.pathname.slice(10), se = sessOf(req);
@@ -2392,11 +2397,11 @@ const srv = http.createServer(async (req, res) => {
         if (LOGIN_TRY.length >= 8) return send(res, 429, { error: 'Terlalu banyak percobaan. Tunggu 1 menit.' });
         if (!AUTH) return send(res, 400, { error: 'Belum ada akun. Buat akun dulu.' });
         if (!checkPw(String(b.user || ''), String(b.pass || ''))) { LOGIN_TRY.push(now); return send(res, 401, { error: 'Nama pengguna atau kata sandi salah' }); }
-        newSess(res, AUTH.user); return send(res, 200, { ok: true, user: AUTH.user });
+        { const who = ACCTS.size ? String(b.user).trim() : AUTH.user; newSess(res, who); return send(res, 200, { ok: true, user: who }); }
       }
       if (a === 'logout') { const t = cookieOf(req, 'tb_sess'); if (t) SESS.delete(t); res.setHeader('Set-Cookie', 'tb_sess=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return send(res, 200, { ok: true }); }
-      if (a === 'setup' && !AUTH && E.RENDER) return send(res, 403, { error: 'Di hosting, akun harus diatur lewat LOGIN_USER dan LOGIN_PASSWORD di pengaturan Environment.' });
-      if (a === 'setup' && AUTH && AUTH.env) return send(res, 403, { error: 'Akun diatur lewat file .env (LOGIN_USER / LOGIN_PASSWORD)' });
+      if (a === 'setup' && !AUTH && E.RENDER) return send(res, 403, { error: 'Di hosting, akun harus diatur lewat LOGIN_USERS di pengaturan Environment.' });
+      if (a === 'setup' && AUTH && AUTH.env) return send(res, 403, { error: 'Akun diatur lewat pengaturan Environment (LOGIN_USERS)' });
       if (a === 'setup') { // buat akun (atau ganti kata sandi saat sudah masuk)
         if (AUTH && !se) return send(res, 401, { error: 'Masuk dulu untuk mengganti akun' });
         if (AUTH && !checkPw(AUTH.user, String(b.old || ''))) return send(res, 401, { error: 'Kata sandi lama salah' });
@@ -2469,9 +2474,9 @@ const srv = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/api/assets') {
       try { return send(res, 200, { cat: u.searchParams.get('cat'), list: await assetList(String(u.searchParams.get('cat') || ''), u.searchParams.get('q')) }); } catch (e) { return send(res, 502, { error: shortErr(e) }); }
     }
-    if (req.method === 'GET' && u.pathname === '/api/quota') return send(res, 200, quotaView('local', EDITION));
+    if (req.method === 'GET' && u.pathname === '/api/quota') return send(res, 200, quotaView((sessOf(req) || {}).user || 'local', EDITION));
     if (req.method === 'GET' && (u.pathname === '/api/mi' || u.pathname === '/api/research' || u.pathname === '/api/ii/value')) {
-      try { req.qBack = quotaTake('local', EDITION, u.pathname === '/api/mi' ? 'mi' : u.pathname === '/api/research' ? 'rd' : 'ii'); } catch (e) { return send(res, 429, { error: e.message, quota: true }); }
+      try { req.qBack = quotaTake((sessOf(req) || {}).user || 'local', EDITION, u.pathname === '/api/mi' ? 'mi' : u.pathname === '/api/research' ? 'rd' : 'ii'); } catch (e) { return send(res, 429, { error: e.message, quota: true }); }
     }
     if (req.method === 'GET' && u.pathname === '/api/ii/value') { try { return send(res, 200, await cached('ii:value', 10 * 60e3, iiValue)); } catch (e) { if (req.qBack) req.qBack(); return send(res, 502, { error: shortErr(e) }); } }
     if (req.method === 'GET' && u.pathname === '/api/mi') {

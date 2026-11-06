@@ -8,7 +8,5 @@ services:
     envVars:
       - key: HOST
         value: 0.0.0.0
-      - key: LOGIN_USER
-        sync: false
-      - key: LOGIN_PASSWORD
+      - key: LOGIN_USERS
         sync: false
