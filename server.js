@@ -569,7 +569,7 @@ const CG_KEY = E.COINGECKO_API_KEY || '', CG_BASE = (E.COINGECKO_BASE || (CG_KEY
 const PAPRIKA = (E.COINPAPRIKA_BASE || 'https://api.coinpaprika.com/v1').replace(/\/$/, '');
 const CG_GAP = Math.max(0, +(E.COINGECKO_GAP_MS || (CG_KEY ? 2100 : 2600))); // jeda antar panggilan agar tidak kena batas akses gratis
 let CGQ = Promise.resolve(), CG_LAST = 0;
-function cg(q) {
+function cgRaw(q) {
   const run = async () => {
     const w = CG_LAST + CG_GAP - Date.now(); if (w > 0) await new Promise(r => setTimeout(r, w));
     CG_LAST = Date.now(); const ac = new AbortController(), t = setTimeout(() => ac.abort(), 15000);
@@ -581,6 +581,54 @@ function cg(q) {
     } finally { clearTimeout(t); }
   };
   const p = CGQ.then(run, run); CGQ = p.catch(() => { }); return p;
+}
+
+let CG_DOWN = 0, CGB = { top: null, at: 0, src: '' };
+function cg(q) { // CoinGecko; bila gagal atau diblokir, daftar pasar, data global dan trending otomatis diambil dari CoinMarketCap (bila CMC_API_KEY diisi) lalu CoinPaprika
+  const fb = /^\/(coins\/markets\?(?!.*[?&]ids=).*per_page=100|global$|search\/trending)/.test(q);
+  if (!fb) return cgRaw(q);
+  if (Date.now() < CG_DOWN) return cgBackup(q).catch(() => cgRaw(q));
+  return cgRaw(q).catch(e => { CG_DOWN = Date.now() + 120e3; return cgBackup(q).catch(e2 => { throw new Error(e.message + '; cadangan: ' + e2.message); }); });
+}
+const CMC_KEY = () => String(E.CMC_API_KEY || '').trim();
+async function cgbTop() { // 100 koin teratas dalam bentuk yang sama dengan CoinGecko
+  if (CGB.top && Date.now() - CGB.at < 90e3) return CGB.top;
+  let out = null, src = '', er = [];
+  if (CMC_KEY()) { try {
+    const j = await xFetch(XB.cmc + '/v1/cryptocurrency/listings/latest?limit=100&convert=USD', { headers: { 'X-CMC_PRO_API_KEY': CMC_KEY() } }, 12000);
+    out = (j.data || []).map(c => { const u = (c.quote || {}).USD || {}; return { id: c.slug, symbol: String(c.symbol || '').toLowerCase(), name: c.name, image: 'https://s2.coinmarketcap.com/static/img/coins/64x64/' + c.id + '.png', current_price: u.price, price_change_percentage_1h_in_currency: u.percent_change_1h, price_change_percentage_24h_in_currency: u.percent_change_24h, price_change_percentage_24h: u.percent_change_24h, price_change_percentage_7d_in_currency: u.percent_change_7d, price_change_percentage_30d_in_currency: u.percent_change_30d, market_cap: u.market_cap, total_volume: u.volume_24h, market_cap_rank: c.cmc_rank, high_24h: null, low_24h: null }; }).filter(c => c.current_price > 0);
+    if (out.length) src = 'CoinMarketCap'; else out = null;
+  } catch (e) { er.push('CoinMarketCap: ' + e.message); } }
+  if (!out) { try {
+    const a = await getJson(PAPRIKA + '/tickers?quotes=USD&limit=100', 20000);
+    out = (Array.isArray(a) ? a : []).filter(t => t && t.quotes && t.quotes.USD && +t.quotes.USD.price > 0 && +t.rank > 0).sort((x, y) => x.rank - y.rank).slice(0, 100).map(t => { const u = t.quotes.USD; return { id: String(t.id).split('-').slice(1).join('-') || t.id, symbol: String(t.symbol || '').toLowerCase(), name: t.name, image: 'https://static.coinpaprika.com/coin/' + t.id + '/logo.png', current_price: u.price, price_change_percentage_1h_in_currency: u.percent_change_1h, price_change_percentage_24h_in_currency: u.percent_change_24h, price_change_percentage_24h: u.percent_change_24h, price_change_percentage_7d_in_currency: u.percent_change_7d, price_change_percentage_30d_in_currency: u.percent_change_30d, market_cap: u.market_cap, total_volume: u.volume_24h, market_cap_rank: t.rank, high_24h: null, low_24h: null }; });
+    if (out.length) src = 'CoinPaprika'; else out = null;
+  } catch (e) { er.push('CoinPaprika: ' + e.message); } }
+  if (!out) throw new Error(er.join('; ') || 'tidak ada sumber cadangan');
+  try { const j = await getJsonH(MK.cdc + '/public/get-tickers', 8000), m = {}; // tertinggi/terendah 24 jam dari Crypto.com
+    for (const x of ((j.result || {}).data || [])) { const mm = /^([A-Z0-9]+)_(USDT|USD)$/.exec(x.i || ''); if (mm && !(m[mm[1]] && mm[2] === 'USDT')) m[mm[1]] = x; }
+    for (const c of out) { const x = m[String(c.symbol).toUpperCase()]; if (x && +x.h > 0 && +x.l > 0 && c.current_price > 0 && Math.abs(+x.a / c.current_price - 1) < 0.1) { c.high_24h = +x.h; c.low_24h = +x.l; } }
+  } catch (e) { }
+  CGB = { top: out, at: Date.now(), src }; log('Data pasar kripto dari cadangan:', src); return out;
+}
+async function cgbGlobal() {
+  const top = await cgbTop(), pct = (sym, tot) => { const c = top.find(x => x.symbol === sym); return c && tot > 0 ? +c.market_cap / tot * 100 : null; };
+  if (CGB.src === 'CoinMarketCap') { try {
+    const j = await xFetch(XB.cmc + '/v1/global-metrics/quotes/latest', { headers: { 'X-CMC_PRO_API_KEY': CMC_KEY() } }, 12000), d = j.data || {}, u = (d.quote || {}).USD || {}, tot = +u.total_market_cap;
+    if (tot > 0) return { data: { total_market_cap: { usd: tot }, total_volume: { usd: u.total_volume_24h }, market_cap_change_percentage_24h_usd: u.total_market_cap_yesterday_percentage_change, market_cap_percentage: { btc: +d.btc_dominance, eth: +d.eth_dominance, usdt: pct('usdt', tot) }, active_cryptocurrencies: d.active_cryptocurrencies } };
+  } catch (e) { } }
+  const g = await getJson(PAPRIKA + '/global', 12000), tot = +g.market_cap_usd; if (!(tot > 0)) throw new Error('data global kosong');
+  return { data: { total_market_cap: { usd: tot }, total_volume: { usd: +g.volume_24h_usd }, market_cap_change_percentage_24h_usd: +g.market_cap_change_24h, market_cap_percentage: { btc: +g.bitcoin_dominance_percentage || pct('btc', tot), eth: pct('eth', tot), usdt: pct('usdt', tot) }, active_cryptocurrencies: g.cryptocurrencies_number } };
+}
+async function cgbTrend() { // pengganti trending: koin top 100 dengan gerak harga 24 jam terbesar (stablecoin dibuang)
+  const top = await cgbTop(), a = top.filter(c => isFinite(c.price_change_percentage_24h_in_currency) && !STABLE.has(c.symbol)).sort((x, y) => Math.abs(y.price_change_percentage_24h_in_currency) - Math.abs(x.price_change_percentage_24h_in_currency)).slice(0, 10);
+  return { coins: a.map(c => ({ item: { id: c.id, name: c.name, symbol: c.symbol, market_cap_rank: c.market_cap_rank, data: { price: c.current_price, price_change_percentage_24h: { usd: c.price_change_percentage_24h_in_currency } } } })) };
+}
+async function cgBackup(q) {
+  if (q.startsWith('/coins/markets')) return cgbTop();
+  if (q === '/global') return cgbGlobal();
+  if (q.startsWith('/search/trending')) return cgbTrend();
+  throw new Error('tidak ada cadangan');
 }
 const UD = { now: null, at: 0, src: '', err: '' }, UD_FILE = path.join(CFG.dataDir, 'usdtd.json');
 let UDH = {}; try { const j = JSON.parse(fs.readFileSync(UD_FILE, 'utf8')); for (const [d, v] of Object.entries(j || {})) if (v && Array.isArray(v.pts)) UDH[d] = { at: +v.at || 0, pts: v.pts }; } catch (e) { }
@@ -2206,6 +2254,16 @@ function weekly(pts) { // titik harian -> candle mingguan (open/high/low/close)
   for (const p of pts) { const w = Math.floor((p.t + 3 * 86400) / 604800); if (!cur || cur.w !== w) { cur = { w, t: p.t, o: p.c, h: p.c, l: p.c, c: p.c }; out.push(cur); } else { cur.h = Math.max(cur.h, p.c); cur.l = Math.min(cur.l, p.c); cur.c = p.c; } }
   return out.map(({ t, o, h, l, c }) => ({ t, o, h, l, c }));
 }
+
+async function cdcChart(sym, range) { // cadangan grafik kripto: candle publik Crypto.com (tanpa kunci)
+  const [tf, n] = { '1D': ['5m', 288], '1W': ['1h', 168], '1M': ['4h', 180], '3M': ['1D', 90], '1Y': ['1D', 300], '5Y': ['7D', 260], ALL: ['7D', 300] }[range] || ['1h', 168];
+  let a = null;
+  for (const q of [sym + '_USDT', sym + '_USD']) { try { const j = await getJsonH(MK.cdc + '/public/get-candlestick?instrument_name=' + q + '&timeframe=' + tf + '&count=' + n, 10000); const d = (j.result || j).data || []; if (d.length) { a = d; break; } } catch (e) { } }
+  if (!a) throw new Error('data grafik Crypto.com kosong');
+  const pts = a.map(x => { let t = x.t != null ? +x.t : Date.parse(x.timestamp); if (t > 1e12) t = Math.floor(t / 1000); const g = (k1, k2) => +(x[k1] != null ? x[k1] : x[k2]); return { t, o: g('o', 'open'), h: g('h', 'high'), l: g('l', 'low'), c: g('c', 'close') }; }).filter(x => x.t > 0 && x.c > 0).sort((x, y) => x.t - y.t);
+  if (!pts.length) throw new Error('data grafik Crypto.com kosong');
+  return { cur: 'USD', pts, src: 'Crypto.com', ohlc: true, first: pts[0].t };
+}
 async function mktChart(src, sym, range, opt) {
   range = Y_RANGE[range] ? range : '1D'; opt = opt || {};
   if (src === 'cg' && opt.sym && /^[A-Z0-9]{1,10}$/.test(opt.sym)) { // kripto: Yahoo (OHLC, riwayat panjang); dicek terhadap harga CoinGecko, bila meleset pakai CoinGecko
@@ -2217,7 +2275,7 @@ async function mktChart(src, sym, range, opt) {
       return { cur: 'USD', prev: meta.chartPreviousClose, pts: out, src: 'Yahoo Finance' + (out !== pts ? ' + Coin Metrics' : ''), ohlc: true, first: out.length ? out[0].t : null };
     } catch (e) { }
   }
-  if (src === 'cg') { const days = { '1D': 1, '1W': 7, '1M': 30, '3M': 90, '1Y': 365, '5Y': 1825, ALL: 'max' }[range]; if (!/^[a-z0-9-]{1,60}$/.test(sym)) throw new Error('id koin tidak valid'); const j = await cg('/coins/' + sym + '/market_chart?vs_currency=usd&days=' + days); return { cur: 'USD', pts: (j.prices || []).map(([t, c]) => ({ t: Math.floor(t / 1000), c })) }; }
+  if (src === 'cg') { const days = { '1D': 1, '1W': 7, '1M': 30, '3M': 90, '1Y': 365, '5Y': 1825, ALL: 'max' }[range]; if (!/^[a-z0-9-]{1,60}$/.test(sym)) throw new Error('id koin tidak valid'); try { const j = await cg('/coins/' + sym + '/market_chart?vs_currency=usd&days=' + days); return { cur: 'USD', pts: (j.prices || []).map(([t, c]) => ({ t: Math.floor(t / 1000), c })) }; } catch (e) { if (opt.sym && /^[A-Z0-9]{1,10}$/.test(opt.sym)) return await cdcChart(opt.sym, range); throw e; } }
   if (src === 'mt5') { const tf = { '1D': 'M5', '1W': 'M30', '1M': 'H4', '3M': 'D1', '1Y': 'D1', '5Y': 'W1', ALL: 'MN1' }[range], n = { '1D': 288, '1W': 240, '1M': 186, '3M': 66, '1Y': 260, '5Y': 260, ALL: 300 }[range]; const a = await getJsonH(MK.mt5 + '/rates?symbol=' + encodeURIComponent(sym) + '&tf=' + tf + '&n=' + n, 4000, { Accept: 'application/json' }); return { cur: '', pts: (a || []).map(x => ({ t: +x.time, o: +x.open, h: +x.high, l: +x.low, c: +x.close })) }; }
   if (!/^[\^A-Za-z0-9=.\-]{1,20}$/.test(sym)) throw new Error('simbol tidak valid');
   const [r, iv] = range === 'ALL' ? ['max', '1wk'] : Y_RANGE[range], { meta, pts } = await yChart(sym, r, iv); return { cur: meta.currency || '', prev: meta.chartPreviousClose, pts, ohlc: true, first: pts.length ? pts[0].t : null };

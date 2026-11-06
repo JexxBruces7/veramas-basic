@@ -1859,11 +1859,7 @@
         <div class="lang-menu" id="langMenu" hidden role="menu"></div>
         <div class="acct-menu" id="acctMenu" hidden role="menu">
             <div class="am-user" id="amUser"></div>
-            <div class="am-grp"><div class="am-lbl">🌐 <span>Bahasa</span></div><div class="am-langs" id="amLangs"></div></div>
             <div class="am-grp"><div class="am-lbl">🎨 <span>Tema</span></div><div class="am-seg" id="amTheme"><button type="button" data-th="dark">🌙 <span>Gelap</span></button><button type="button" data-th="light">☀️ <span>Terang</span></button></div></div>
-            <div class="am-grp am-lic" id="amLic"><div class="am-lbl">🔑 <span>Lisensi</span></div><div class="am-licst" id="amLicTxt"></div>
-                <div class="am-licrow"><input id="amLicKey" placeholder="TBP-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" maxlength="24" aria-label="Kunci lisensi"><button type="button" id="amLicBtn" onclick="licActivate()">Aktifkan</button></div>
-                <div class="am-licrow"><button type="button" id="amLicChk" onclick="licCheck()">Cek ulang</button><a id="amLicBuy" target="_blank" rel="noopener" hidden>Beli / perpanjang</a></div></div>
             <button type="button" class="am-item am-install" id="amInstall" onclick="installApp()">⬇️ <span>Install App</span><small id="amInstallSub">Pasang Veramas seperti aplikasi</small></button>
         </div>
 
@@ -4258,7 +4254,7 @@
 
         // ==================== SIDEBAR PASAR: Trade Intelligence, Crypto, Saham, Forex, Commodities, Macro ====================
         const MKP = {
-            crypto: { n: 'Crypto', src: 'CoinGecko · Wallet Treasury on-chain' }, saham: { n: 'Saham', src: 'IDX (cadangan Yahoo Finance)' },
+            crypto: { n: 'Crypto', src: 'CoinGecko, cadangan CoinMarketCap & CoinPaprika · Wallet Treasury on-chain' }, saham: { n: 'Saham', src: 'IDX (cadangan Yahoo Finance)' },
             forex: { n: 'Forex', src: 'MetaTrader 5 (cadangan Yahoo Finance)' }, commod: { n: 'Commodities', src: 'Harga futures · tautan investing.com' }, prop: { n: 'Property', src: 'Listing Anda · saham properti IDX' }, macro: { n: 'Macro Economy', src: 'CNN · Bloomberg Technoz · kalender ekonomi' }, global: { n: 'Macro Global', src: 'Berita dunia · data bencana' },
         };
         const MKS = { pg: 'trade', d: {}, ch: {}, tab: {}, timer: 0 };
@@ -4340,7 +4336,7 @@
             const col2 = card(esc(c.name) + ' <small>' + esc(c.sym) + '/USD</small>', chartBox('cg', c.id, '$' + pxAuto(c.usd), ' ' + chip(c.ch24), rg, ['1D', '1W', '1M', '3M', '1Y', '5Y', 'ALL'], { csym: c.sym, px: c.usd })
                 + '<div class="mk-ohl"><div><small>Tertinggi 24j</small><b>' + (c.hi > 0 ? '$' + pxAuto(c.hi) : '-') + '</b></div><div><small>Terendah 24j</small><b>' + (c.lo > 0 ? '$' + pxAuto(c.lo) : '-') + '</b></div><div><small>Market cap</small><b>' + (c.mcap > 0 ? '$' + bigN(c.mcap) : '-') + '</b></div><div><small>Volume 24j</small><b>' + (c.vol > 0 ? '$' + bigN(c.vol) : '-') + '</b></div></div>')
                 + card('🔐 Wallet Treasury <small>alamat whale yang Anda kumpulkan</small>', walCard(), 'fill wal');
-            const col3 = card('🔥 Trending · CoinGecko', (d.trend || []).map(x => '<div class="mk-li"' + (top.some(t => t.id === x.id) ? ' data-sel=\'' + JSON.stringify({ id: x.id }) + '\'' : '') + '><span><b>' + esc(x.sym) + '</b> ' + esc(x.name) + (x.rank ? ' <small>#' + x.rank + '</small>' : '') + '</span>' + chip(x.ch24, 1) + '</div>').join('') + errNote(d, 'trend'))
+            const col3 = card('🔥 Trending', (d.trend || []).map(x => '<div class="mk-li"' + (top.some(t => t.id === x.id) ? ' data-sel=\'' + JSON.stringify({ id: x.id }) + '\'' : '') + '><span><b>' + esc(x.sym) + '</b> ' + esc(x.name) + (x.rank ? ' <small>#' + x.rank + '</small>' : '') + '</span>' + chip(x.ch24, 1) + '</div>').join('') + errNote(d, 'trend'))
                 + card('📰 Berita kripto', '<div class="mk-fillb">' + newsList(d.news) + '</div>', 'fill');
             return '<div class="mk-g3 eq">' + '<div class="mk-col">' + col1 + '</div><div class="mk-col">' + col2 + '</div><div class="mk-col">' + col3 + '</div></div>' + eiSection();
         }
