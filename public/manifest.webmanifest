@@ -1,0 +1,16 @@
+{
+  "name": "Veramas Basic",
+  "short_name": "Veramas",
+  "description": "Bot trading & dashboard pasar (Indodax, saham, forex, komoditas) yang berjalan di komputer Anda.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a12",
+  "theme_color": "#12142e",
+  "lang": "id",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

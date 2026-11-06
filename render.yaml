@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: veramas-basic
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOGIN_USER
+        sync: false
+      - key: LOGIN_PASSWORD
+        sync: false

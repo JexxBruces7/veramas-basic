@@ -1,0 +1,5 @@
+Veramas Basic
+
+Jatah Market Intelligence, Research Intelligence, dan Investment Intelligence: 3x per hari (masing-masing, reset 00.00 WIB).
+Paket ini tanpa trading manual dan tanpa bot.
+Jalankan: start.bat (Windows) atau "npm install" lalu "node server.js". Buka http://localhost:3000
