@@ -432,8 +432,37 @@ const P = () => PAIRS[S.settings.pair];
 // ---------- data pasar ----------
 const M = { candles: [], cur: null, price: 0, ch24: null, ref24: 0, lastTick: 0, wsOk: false, src: '-' };
 function tfSec() { return TF_SEC[S.settings.tf] || 60; }
-// ambil sekitar `count` candle terakhir dari Indodax (candle yang belum tutup ikut di ujung)
+// ---------- sumber candle chart: Indodax (utama) dengan cadangan Binance / OKX / Crypto.com, dikonversi ke rupiah ----------
+// Pilihan disimpan di S.settings.chartSrc: auto (Indodax, otomatis pindah bila gagal/kosong) | indodax | binance | okx | cdc
+const CH_SRC = ['auto', 'indodax', 'binance', 'okx', 'cdc'], CH_NAME = { indodax: 'Indodax', binance: 'Binance', okx: 'OKX', cdc: 'Crypto.com' };
+const CH_TF = { binance: { '1': '1m', '15': '15m', '30': '30m', '60': '1h', '240': '4h', '1D': '1d' }, okx: { '1': '1m', '15': '15m', '30': '30m', '60': '1H', '240': '4H', '1D': '1Dutc' }, cdc: { '1': '1m', '15': '15m', '30': '30m', '60': '1h', '240': '4h', '1D': '1D' } };
+async function idrRate() { if (M.usdIdr > 0) return M.usdIdr; const q = (await yQuotes([['IDR=X', 'USD/IDR']]))[0]; if (q && q.last > 0) return q.last; throw new Error('kurs USD/IDR tidak tersedia'); }
+async function extSrcCandles(src, coin, tf, count) {
+  const C = String(coin || '').toUpperCase(), stf = (TF_DEF[tf] || {}).src || tf, iv = (CH_TF[src] || {})[stf];
+  if (!/^[A-Z0-9]{2,12}$/.test(C) || C === 'USDT') throw new Error('koin tidak tersedia di ' + CH_NAME[src]); if (!iv) throw new Error('timeframe tidak tersedia di ' + CH_NAME[src]);
+  const want = Math.ceil(count * (TF_SEC[tf] || 60) / (TF_SEC[stf] || 60)), H = { Accept: 'application/json' }; let k = [];
+  if (src === 'binance') { const a = await getJsonH((E.BINANCE_DATA || 'https://data-api.binance.vision') + '/api/v3/klines?symbol=' + C + 'USDT&interval=' + iv + '&limit=' + Math.min(1000, want), 12000, H); k = (Array.isArray(a) ? a : []).map(x => ({ time: Math.floor(+x[0] / 1000), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] || 0 })); }
+  else if (src === 'okx') { const j = await getJsonH((E.OKX_BASE || 'https://www.okx.com') + '/api/v5/market/candles?instId=' + C + '-USDT&bar=' + iv + '&limit=' + Math.min(300, want), 12000, H); k = ((j && j.data) || []).map(x => ({ time: Math.floor(+x[0] / 1000), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] || 0 })); }
+  else if (src === 'cdc') { const j = await getJsonH(MK.cdc + '/public/get-candlestick?instrument_name=' + C + '_USDT&timeframe=' + iv + '&count=' + Math.min(300, want), 12000, H); k = (((j && j.result) || {}).data || []).map(x => ({ time: Math.floor(+x.t / 1000), open: +x.o, high: +x.h, low: +x.l, close: +x.c, volume: +x.v || 0 })); }
+  else throw new Error('sumber tidak dikenal');
+  const seen = new Set(); k = k.filter(c => c.time > 0 && c.close > 0 && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
+  if (!k.length) throw new Error('data ' + CH_NAME[src] + ' kosong');
+  const r = await idrRate(); let out = k.map(c => ({ time: c.time, open: c.open * r, high: c.high * r, low: c.low * r, close: c.close * r, volume: c.volume }));
+  if (stf !== tf) out = aggregate(out, tf);
+  return out;
+}
+// candle chart dengan sumber pilihan + cadangan otomatis. Hasil berupa array; properti .src = sumber yang dipakai
 async function fetchCandles(p, tf, count) {
+  const pref = CH_SRC.includes(S.settings.chartSrc) ? S.settings.chartSrc : 'auto', tag = (k, s) => { k.src = s; return k; };
+  if (pref !== 'auto' && pref !== 'indodax') { try { return tag(await extSrcCandles(pref, p.coin, tf, count), pref); } catch (e) { log('Sumber chart ' + CH_NAME[pref] + ' gagal (' + e.message + '), pakai Indodax'); } }
+  let err;
+  try { const kk = await indodaxCandles(p, tf, count); if (pref === 'indodax' || kk.length >= Math.min(30, Math.floor(count / 4))) return tag(kk, 'indodax'); err = new Error('data Indodax hanya ' + kk.length + ' candle'); }
+  catch (e) { err = e; if (pref === 'indodax') throw e; }
+  for (const s2 of ['binance', 'okx', 'cdc']) { if (s2 === pref) continue; try { const k = await extSrcCandles(s2, p.coin, tf, count); log('Candle ' + p.symbol + ' ' + tf + ' dari ' + CH_NAME[s2] + ' (Indodax: ' + err.message + ')'); return tag(k, s2); } catch (e) { } }
+  throw err;
+}
+// ambil sekitar `count` candle terakhir dari Indodax (candle yang belum tutup ikut di ujung)
+async function indodaxCandles(p, tf, count) {
   const sec = TF_SEC[tf] || 60, src = (TF_DEF[tf] || {}).src || tf, to = Math.floor(Date.now() / 1000), from = to - sec * count;
   const a = await getJson(`${CFG.base}/tradingview/history_v2?from=${from}&symbol=${encodeURIComponent(p.symbol)}&tf=${encodeURIComponent(src)}&to=${to}`, 25000);
   const k = (Array.isArray(a) ? a : []).map(c => ({ time: +c.Time, open: +c.Open, high: +c.High, low: +c.Low, close: +c.Close, volume: +c.Volume || 0 }))
@@ -446,7 +475,7 @@ async function loadHistory() {
   const p = P(), tf = S.settings.tf;
   try {
     const kk = await fetchCandles(p, tf, 300);
-    M.candles = kk.slice(-400);
+    M.candles = kk.slice(-400); M.chSrc = kk.src || 'indodax';
     const now = bucketOf(Math.floor(Date.now() / 1000), tf);
     if (M.candles.length && M.candles[M.candles.length - 1].time >= now) M.cur = M.candles.pop(); else M.cur = null;
     const last = M.cur || M.candles[M.candles.length - 1];
@@ -584,11 +613,13 @@ function cgRaw(q) {
 }
 
 let CG_DOWN = 0, CGB = { top: null, at: 0, src: '' };
-function cg(q) { // CoinGecko; bila gagal atau diblokir, daftar pasar, data global dan trending otomatis diambil dari CoinMarketCap (bila CMC_API_KEY diisi) lalu CoinPaprika
-  const fb = /^\/(coins\/markets\?(?!.*[?&]ids=).*per_page=100|global$|search\/trending)/.test(q);
+const CG_KEEP_FILE = path.join(CFG.dataDir, 'cg_last.json'); let CG_KEEP = {}; try { CG_KEEP = JSON.parse(fs.readFileSync(CG_KEEP_FILE, 'utf8')) || {}; } catch (e) { }
+function cg(q) { // CoinGecko; bila gagal atau diblokir: pasar, global, trending, kategori dari CoinMarketCap (bila CMC_API_KEY diisi) / CoinPaprika / DefiLlama; treasury dari data terakhir yang tersimpan
+  const fb = /^\/(coins\/markets\?(?!.*[?&]ids=).*per_page=100|global$|search\/trending|coins\/categories|companies\/public_treasury\/bitcoin)/.test(q);
   if (!fb) return cgRaw(q);
-  if (Date.now() < CG_DOWN) return cgBackup(q).catch(() => cgRaw(q));
-  return cgRaw(q).catch(e => { CG_DOWN = Date.now() + 120e3; return cgBackup(q).catch(e2 => { throw new Error(e.message + '; cadangan: ' + e2.message); }); });
+  const keep = j => { if (q.startsWith('/companies/public_treasury/bitcoin') && j && Array.isArray(j.companies)) { CG_KEEP.treas = { at: Date.now(), j }; try { fs.writeFileSync(CG_KEEP_FILE, JSON.stringify(CG_KEEP)); } catch (e) { } } return j; };
+  if (Date.now() < CG_DOWN) return cgBackup(q).catch(() => cgRaw(q).then(keep));
+  return cgRaw(q).then(keep).catch(e => { CG_DOWN = Date.now() + 120e3; return cgBackup(q).catch(e2 => { throw new Error(e.message + '; cadangan: ' + e2.message); }); });
 }
 const CMC_KEY = () => String(E.CMC_API_KEY || '').trim();
 async function cgbTop() { // 100 koin teratas dalam bentuk yang sama dengan CoinGecko
@@ -624,7 +655,37 @@ async function cgbTrend() { // pengganti trending: koin top 100 dengan gerak har
   const top = await cgbTop(), a = top.filter(c => isFinite(c.price_change_percentage_24h_in_currency) && !STABLE.has(c.symbol)).sort((x, y) => Math.abs(y.price_change_percentage_24h_in_currency) - Math.abs(x.price_change_percentage_24h_in_currency)).slice(0, 10);
   return { coins: a.map(c => ({ item: { id: c.id, name: c.name, symbol: c.symbol, market_cap_rank: c.market_cap_rank, data: { price: c.current_price, price_change_percentage_24h: { usd: c.price_change_percentage_24h_in_currency } } } })) };
 }
+const CAT_SECT = { 'Layer 1': 'eth sol ada avax dot trx ton sui apt near atom algo icp hbar sei kas etc egld hype', 'Layer 2': 'arb op pol matic imx stx mnt strk zk', 'DeFi': 'uni aave mkr sky crv ldo ena pendle jup ray cake inj dydx comp snx gmx morpho',
+  'Meme': 'doge shib pepe bonk wif floki trump fartcoin brett popcat pengu', 'AI & Big Data': 'fet tao render wld virtual akt grt theta', 'Real World Assets': 'ondo om plume', 'Exchange Token': 'bnb okb cro leo kcs gt bgb',
+  'Pembayaran': 'xrp xlm ltc bch', 'Privasi': 'xmr zec dash', 'Oracle & Infrastruktur': 'link pyth fil ar qnt', 'Gaming & Metaverse': 'sand mana axs gala ape' };
+async function stableLlama() { // total pasokan stablecoin (USD) dan perubahan 24 jam dari DefiLlama, tanpa kunci
+  const j = await getJsonH(LLAMA_ST + '/stablecoins?includePrices=false', 15000, { Accept: 'application/json' }); let now = 0, prev = 0;
+  for (const x of (j && j.peggedAssets) || []) { const c = +((x.circulating || {}).peggedUSD) || 0, p = +((x.circulatingPrevDay || {}).peggedUSD) || 0; if (c > 0 && p > 0) { now += c; prev += p; } }
+  return now > 0 && prev > 0 ? { id: 'stablecoins', name: 'Stablecoins', market_cap: now, market_cap_change_24h: (now / prev - 1) * 100, volume_24h: null, top_3_coins_id: [] } : null;
+}
+async function cgbCats() { // kategori/narasi: CoinMarketCap (bila ada kunci), atau perkiraan sektor dari 100 koin teratas; stablecoin dari DefiLlama
+  let out = null;
+  if (CMC_KEY()) { try {
+    const j = await xFetch(XB.cmc + '/v1/cryptocurrency/categories?limit=200', { headers: { 'X-CMC_PRO_API_KEY': CMC_KEY() } }, 12000);
+    const a = (j.data || []).map(c => ({ id: /^stablecoins?$/i.test(String(c.name).trim()) ? 'stablecoins' : 'cmc-' + c.id, name: c.name, market_cap: +c.market_cap, market_cap_change_24h: +c.market_cap_change, volume_24h: +c.volume || null, top_3_coins_id: [] })).filter(c => c.market_cap > 0 && isFinite(c.market_cap_change_24h));
+    if (a.length) { out = a; out._src = 'CoinMarketCap'; }
+  } catch (e) { } }
+  if (!out) {
+    const top = await cgbTop(); out = [];
+    for (const [name, list] of Object.entries(CAT_SECT)) {
+      const set = new Set(list.split(' ')), mem = top.filter(c => set.has(c.symbol) && c.market_cap > 0 && isFinite(c.price_change_percentage_24h_in_currency)); if (mem.length < 2) continue;
+      const mc = mem.reduce((t, c) => t + c.market_cap, 0), prev = mem.reduce((t, c) => t + c.market_cap / (1 + c.price_change_percentage_24h_in_currency / 100), 0);
+      out.push({ id: 'sek-' + name.toLowerCase().replace(/\W+/g, '-'), name, market_cap: mc, market_cap_change_24h: (mc / prev - 1) * 100, volume_24h: mem.reduce((t, c) => t + (+c.total_volume || 0), 0), top_3_coins_id: mem.sort((x, y) => y.market_cap - x.market_cap).slice(0, 3).map(c => c.id) });
+    }
+    out._src = 'perkiraan dari 100 koin teratas (' + (CGB.src || 'cadangan') + ')';
+  }
+  if (!out.some(c => c.id === 'stablecoins')) { try { const st = await stableLlama(); if (st) out.push(st); } catch (e) { } }
+  if (!out.length) throw new Error('data kategori cadangan kosong');
+  return out;
+}
 async function cgBackup(q) {
+  if (q.startsWith('/coins/categories')) return cgbCats();
+  if (q.startsWith('/companies/public_treasury/bitcoin')) { if (CG_KEEP.treas && CG_KEEP.treas.j) return { ...CG_KEEP.treas.j, _stale: CG_KEEP.treas.at }; throw new Error('belum ada data treasury tersimpan'); }
   if (q.startsWith('/coins/markets')) return cgbTop();
   if (q === '/global') return cgbGlobal();
   if (q.startsWith('/search/trending')) return cgbTrend();
@@ -1457,7 +1518,7 @@ async function research(pair) {
         d.wp = { url: (j.links || {}).whitepaper || '', site: ((j.links || {}).homepage || []).find(Boolean) || '', summary: sent, rows: [
           ['Kategori', (j.categories || []).filter(Boolean).slice(0, 3).join(', ')], ['Algoritma', j.hashing_algorithm || ''], ['Diluncurkan', j.genesis_date || ''], ['Peringkat market cap', j.market_cap_rank ? '#' + j.market_cap_rank : '']].filter(x => x[1]) };
       })().catch(e => { d.err.coin = e.message; }),
-      (async () => { d.tech = techLevels(await fetchCandles(p, '1D', 220)); if (!d.tech) throw new Error('candle harian belum cukup'); })().catch(e => { d.err.tech = e.message; }),
+      (async () => { const kk = await fetchCandles(p, '1D', 220); d.tech = techLevels(kk); if (!d.tech) throw new Error('candle harian belum cukup'); d.tech.src = CH_NAME[kk.src] || 'Indodax'; })().catch(e => { d.err.tech = e.message; }),
       (async () => {
         const it = await newsItems(), re = new RegExp('\\b(' + [sym, p.desc].filter(Boolean).map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b', 'i');
         const mine = it.filter(x => re.test(x.title + ' ' + x.desc)), seen = new Set();
@@ -2084,8 +2145,11 @@ async function mktForex() {
   try { const q = await mt5Quotes(); d.src = 'MetaTrader 5'; d.rows = FX.map(([s, n]) => { const x = q.find(z => String(z.symbol).toUpperCase().startsWith(s)); return x ? { sym: s, name: n, bid: +x.bid, ask: +x.ask, last: (+x.bid + +x.ask) / 2, prev: +x.prev_close || null, ch: +x.prev_close ? ((+x.bid + +x.ask) / 2 / +x.prev_close - 1) * 100 : null, spread: +x.spread || null, mt5sym: x.symbol } : { sym: s, name: n, err: 'tidak ada di MT5' }; }); }
   catch (e) { d.err.mt5 = 'Jembatan MT5 tidak aktif (' + shortErr(e) + ')'; d.src = 'Yahoo Finance'; d.rows = await yQuotes(FX.map(([s, n]) => [YFX(s), n, { pair: s }])); d.rows.forEach(r => { r.yahoo = r.sym; r.sym = r.pair; }); }
   d.idr = await yQuotes([['IDR=X', 'USD/IDR'], ['EURIDR=X', 'EUR/IDR'], ['SGDIDR=X', 'SGD/IDR'], ['JPYIDR=X', 'JPY/IDR'], ['CNYIDR=X', 'CNY/IDR'], ['AUDIDR=X', 'AUD/IDR'], ['GBPIDR=X', 'GBP/IDR'], ['MYRIDR=X', 'MYR/IDR']]);
+  d.news = await rssPull(FX_RSS, FX_RE, 30).catch(() => []);
   return d;
 }
+const FX_RSS = (E.FOREX_RSS || 'https://www.investing.com/rss/news_1.rss,https://www.fxstreet.com/rss/news,https://www.cnbcindonesia.com/market/rss,https://www.cnnindonesia.com/ekonomi/rss,https://www.bloombergtechnoz.com/rss').split(',').map(x => x.trim()).filter(Boolean);
+const FX_RE = /\b(rupiah|dolar|dollar|USD|EUR|euro|yen|JPY|pound|sterling|GBP|yuan|renminbi|CNY|franc|CHF|AUD|NZD|CAD|SGD|valas|kurs|forex|FX|currenc\w*|mata uang|Fed|FOMC|ECB|BoJ|BoE|BI[- ]?Rate|suku bunga|interest rates?|inflasi|inflation|DXY|payrolls?|NFP|CPI|Treasury yields?)\b/i;
 const COMM = [['GC=F', 'Emas', 'USD/troy oz', 'gold'], ['SI=F', 'Perak', 'USD/troy oz', 'silver'], ['PL=F', 'Platinum', 'USD/troy oz', 'platinum'], ['HG=F', 'Tembaga', 'USD/lb', 'copper'], ['CL=F', 'Minyak WTI', 'USD/barel', 'crude-oil'], ['BZ=F', 'Minyak Brent', 'USD/barel', 'brent-oil'], ['NG=F', 'Gas alam', 'USD/MMBtu', 'natural-gas'], ['ZC=F', 'Jagung', 'sen USD/bushel', 'us-corn'], ['ZW=F', 'Gandum', 'sen USD/bushel', 'us-wheat'], ['ZS=F', 'Kedelai', 'sen USD/bushel', 'us-soybeans'], ['KC=F', 'Kopi Arabika', 'sen USD/lb', 'us-coffee-c'], ['CC=F', 'Kakao', 'USD/ton', 'us-cocoa'], ['SB=F', 'Gula', 'sen USD/lb', 'us-sugar-no11'], ['CT=F', 'Kapas', 'sen USD/lb', 'us-cotton-no.2']];
 // ---------- katalog aset non-kripto untuk chart (tombol 📈 💱 🛢️ 🏠 di pemilih aset) ----------
 const IDX_NAMES = { BBCA: 'Bank Central Asia', BBRI: 'Bank Rakyat Indonesia', BMRI: 'Bank Mandiri', BBNI: 'Bank Negara Indonesia', BBTN: 'Bank Tabungan Negara', BRIS: 'Bank Syariah Indonesia', ARTO: 'Bank Jago', TLKM: 'Telkom Indonesia', ISAT: 'Indosat Ooredoo Hutchison', EXCL: 'XL Axiata', TOWR: 'Sarana Menara Nusantara',
@@ -2309,9 +2373,20 @@ async function marketIntel(fresh) {
       job('cats', async () => { const a = await cg('/coins/categories?order=market_cap_desc'); if (!Array.isArray(a) || !a.length) throw new Error('data kosong');
         const st = a.find(c => c.id === 'stablecoins'); if (st) d.stable = { mcap: +st.market_cap, ch24: +st.market_cap_change_24h };
         const ok = a.filter(c => +c.market_cap > 3e8 && isFinite(+c.market_cap_change_24h) && c.id !== 'stablecoins' && !/stablecoin|wrapped|bridged/i.test(c.name || '')).sort((x, y) => y.market_cap_change_24h - x.market_cap_change_24h), mp = c => ({ name: c.name, ch24: +c.market_cap_change_24h, mcap: +c.market_cap, vol: +c.volume_24h || null, top: (c.top_3_coins_id || []).slice(0, 3) });
-        d.cats = ok.slice(0, 8).map(mp); d.catsDown = ok.filter(c => c.market_cap_change_24h < 0).slice(-4).reverse().map(mp); d.catsN = ok.length; }),
+        d.cats = ok.slice(0, 8).map(mp); d.catsDown = ok.filter(c => c.market_cap_change_24h < 0).slice(-4).reverse().map(mp); d.catsN = ok.length; d.catsSrc = a._src || 'CoinGecko'; }),
       job('treasury', async () => { const t = await cg('/companies/public_treasury/bitcoin'); if (!t || !Array.isArray(t.companies)) throw new Error('data kosong');
-        d.treasury = { total: +t.total_holdings, usd: +t.total_value_usd, pct: +t.market_cap_dominance, top: t.companies.slice(0, 5).map(c => ({ name: c.name, sym: c.symbol, btc: +c.total_holdings, usd: +c.total_current_value_usd, pct: +c.percentage_of_total_supply })) }; }),
+        d.treasury = { total: +t.total_holdings, usd: +t.total_value_usd, pct: +t.market_cap_dominance, top: t.companies.slice(0, 5).map(c => ({ name: c.name, sym: c.symbol, btc: +c.total_holdings, usd: +c.total_current_value_usd, pct: +c.percentage_of_total_supply })), stale: t._stale || null }; }),
+      job('chain', async () => { // on-chain BTC tanpa kunci: transfer besar di antrean (blockchain.com), biaya & antrean (mempool.space), hashrate
+        const MP = (E.MEMPOOL_BASE || 'https://mempool.space/api').replace(/\/$/, ''), BC = (E.BLOCKCHAIN_BASE || 'https://blockchain.info').replace(/\/$/, ''), H = { Accept: 'application/json' };
+        const [fee, mp, hr, ut] = await Promise.all([getJsonH(MP + '/v1/fees/recommended', 9000, H).catch(() => null), getJsonH(MP + '/mempool', 9000, H).catch(() => null), getJsonH(MP + '/v1/mining/hashrate/3d', 9000, H).catch(() => null), getJsonH(BC + '/unconfirmed-transactions?format=json', 12000, H).catch(() => null)]);
+        const c = {}, txs = ut && Array.isArray(ut.txs) ? ut.txs : [];
+        if (fee && fee.fastestFee) c.fee = { fast: +fee.fastestFee, half: +fee.halfHourFee, hour: +fee.hourFee };
+        if (mp && mp.count) c.mempool = { n: +mp.count, vmb: +mp.vsize / 1e6 };
+        if (hr && hr.currentHashrate) c.hash = { ehs: +hr.currentHashrate / 1e18 };
+        if (txs.length) { c.scanned = txs.length; c.big = txs.map(t => ({ id: String(t.hash || ''), btc: (t.out || []).reduce((a, o) => a + (+o.value || 0), 0) / 1e8, at: (+t.time || 0) * 1000, nout: (t.out || []).length })).filter(t => t.btc >= 50 && /^[0-9a-f]{64}$/.test(t.id)).sort((a, b) => b.btc - a.btc).slice(0, 6); }
+        if (!c.fee && !c.mempool && !c.hash && !txs.length) throw new Error('mempool.space dan blockchain.com tidak bisa dijangkau');
+        d.chain = c;
+      }),
       job('fng', async () => { const j = await getJson(XB.fng + '?limit=31', 9000), a = j.data || []; if (!a.length) throw new Error('data kosong'); const v = i => a[i] ? { v: +a[i].value, lb: a[i].value_classification } : null; d.fng = { now: v(0), y: v(1), w: v(7), m: v(30) }; }),
       job('deriv', async () => { // per bursa: Binance → Bybit → OKX (bila satu diblokir/tidak merespons, coba berikutnya)
         const v = await venueDeriv(); d.deriv = v.rows; d.derivVenue = v.venue; if (v.skipped.length) d.derivSkip = v.skipped;
@@ -2341,13 +2416,74 @@ async function marketIntel(fresh) {
     if (d.fng && d.fng.now) { if (d.fng.now.v >= 55) { sc++; why.push('sentimen serakah'); } else if (d.fng.now.v <= 45) { sc--; why.push('sentimen takut'); } }
     if (d.stable && isFinite(d.stable.ch24)) { if (d.stable.ch24 >= 0.2) { sc++; why.push('pasokan stablecoin bertambah'); } else if (d.stable.ch24 <= -0.2) { sc--; why.push('pasokan stablecoin berkurang'); } }
     if (d.deriv && d.deriv[0] && isFinite(d.deriv[0].oich)) { if (d.deriv[0].oich >= 3) why.push('open interest BTC naik ' + d.deriv[0].oich.toFixed(1).replace('.', ',') + '%'); }
-    d.regime = { score: sc, label: sc >= 2 ? 'Angin pendukung' : sc <= -2 ? 'Angin lawan' : 'Campuran', why };
+    d.regime = { score: sc, label: sc >= 1 ? 'Bullish' : sc <= -1 ? 'Bearish' : 'Sideways', why };
     try { d.concl = miConclusion(d, sc); } catch (e) { }
     if (!d.global && !d.top && !d.fng && !d.news && !d.idx) throw new Error('Laporan gagal: ' + (d.err.global || d.err.markets || d.err.idx || 'sumber data tidak bisa dijangkau'));
     MIC = { at: Date.now(), d, p: null }; return d;
   })();
   MIC.p = pr; pr.catch(() => { }).finally(() => { if (MIC.p === pr) MIC.p = null; });
   return pr;
+}
+
+// ---------- Market Intelligence SAHAM (IHSG): pasar, saham teraktif & asing, sektor, global & makro, berita ----------
+// Tim yang sama: Rey (IHSG & pasar), Nadia (teraktif & asing), Dimas (penggerak & sektor), Sinta (berita), Bayu (global & makro).
+const SAHAM_RSS = (E.SAHAM_RSS || 'https://www.cnbcindonesia.com/market/rss,https://www.cnnindonesia.com/ekonomi/rss,https://www.bloombergtechnoz.com/rss,https://www.antaranews.com/rss/ekonomi.xml,https://www.idxchannel.com/rss').split(',').map(x => x.trim()).filter(Boolean);
+const SAHAM_RE = /\b(IHSG|saham|emiten|bursa|BEI|IDX|LQ45|IDX30|dividen|IPO|right issue|rights issue|buyback|asing|net (buy|sell)|BI[- ]?Rate|suku bunga|rupiah|Wall Street|Nasdaq|S&P|Dow Jones|Nikkei|Hang Seng|indeks|obligasi|SBN|investor|pasar modal|OJK|BBCA|BBRI|BMRI|BBNI|TLKM|ASII|GOTO|BREN|AMMN|ADRO|ANTM|UNVR|ICBP)\b/i;
+const IDX_SECT = { IDXENERGY: 'Energi', IDXBASIC: 'Barang Baku', IDXINDUST: 'Perindustrian', IDXNONCYC: 'Konsumen Primer', IDXCYCLIC: 'Konsumen Non-Primer', IDXHEALTH: 'Kesehatan', IDXFINANCE: 'Keuangan', IDXPROPERT: 'Properti & Real Estat', IDXTECHNO: 'Teknologi', IDXINFRA: 'Infrastruktur', IDXTRANS: 'Transportasi & Logistik' };
+let MIS = { at: 0, d: null, p: null };
+async function marketIntelSaham(fresh) {
+  if (!fresh && MIS.d && Date.now() - MIS.at < 10 * 60e3) return MIS.d; if (MIS.p) return MIS.p;
+  const pr = (async () => {
+    const d = { at: Date.now(), kind: 'saham', err: {} }, job = async (k, f) => { try { await f(); } catch (e) { d.err[k] = String((e && e.message) || e).slice(0, 160); } };
+    await Promise.all([
+      job('pasar', async () => {
+        const m = await cached('pg:saham', 120e3, mktSaham);
+        if (m.ihsg && !m.ihsg.err && m.ihsg.last > 0) d.ihsg = { last: m.ihsg.last, prev: m.ihsg.prev, ch: m.ihsg.ch, hi: m.ihsg.hi, lo: m.ihsg.lo };
+        d.index = m.index || null; d.market = m.market || null; d.date = m.date || null; d.src = m.src || ''; d.capEst = m.capEst || null;
+        const cut = (a, n) => (a || []).slice(0, n); d.gainers = cut(m.gainers, 6); d.losers = cut(m.losers, 6); d.active = cut(m.active, 8); d.foreignBuy = cut(m.foreignBuy, 5); d.foreignSell = cut(m.foreignSell, 5);
+        for (const [k, v] of Object.entries(m.err || {})) d.err['pasar_' + k] = v;
+        if (!d.ihsg && !d.active) throw new Error(m.err && (m.err.ihsg || m.err.idx) || 'data saham tidak tersedia');
+      }),
+      job('sektor', async () => {
+        const r = await cached('idx:IndexSummary', 300e3, () => idxDay('IndexSummary'));
+        d.sectors = r.data.map(x => ({ code: String(x.IndexCode || '').toUpperCase(), close: +x.Close, prev: +x.Previous })).filter(x => IDX_SECT[x.code] && x.prev > 0).map(x => ({ name: IDX_SECT[x.code], code: x.code, close: x.close, ch: (x.close / x.prev - 1) * 100 })).sort((a, b) => b.ch - a.ch);
+        if (!d.sectors.length) throw new Error('indeks sektor belum tersedia');
+      }),
+      job('global', async () => {
+        const q = await yQuotes([['^GSPC', 'S&P 500'], ['^IXIC', 'Nasdaq'], ['^DJI', 'Dow Jones'], ['^N225', 'Nikkei 225'], ['^HSI', 'Hang Seng'], ['^STI', 'STI Singapura'], ['^KS11', 'KOSPI']]);
+        d.global = q.filter(x => !x.err && x.last > 0).map(x => ({ name: x.name, last: x.last, ch: x.ch })); if (!d.global.length) throw new Error('indeks global tidak bisa diambil');
+      }),
+      job('makro', async () => {
+        const q = await yQuotes([['IDR=X', 'USD/IDR'], ['DX-Y.NYB', 'Indeks Dolar (DXY)'], ['^TNX', 'Imbal hasil US 10 tahun'], ['^VIX', 'VIX (volatilitas)'], ['GC=F', 'Emas'], ['CL=F', 'Minyak WTI']]);
+        d.macro = q.filter(x => !x.err && x.last > 0).map(x => ({ name: x.name, sym: x.sym, last: x.last, ch: x.ch })); if (!d.macro.length) throw new Error('data makro tidak bisa diambil');
+      }),
+      job('news', async () => { const it = await rssPull(SAHAM_RSS, SAHAM_RE, 10); if (!it.length) throw new Error('feed berita pasar modal tidak bisa diambil'); d.news = it.slice(0, 8).map(({ title, link, at, src }) => ({ title, link, at, src })); }),
+    ]);
+    try { d.concl = sahamConclusion(d); } catch (e) { }
+    if (!d.ihsg && !d.active && !d.global) throw new Error('Laporan saham gagal: ' + (d.err.pasar || d.err.global || 'sumber data tidak bisa dijangkau'));
+    MIS = { at: Date.now(), d, p: null }; return d;
+  })();
+  MIS.p = pr; pr.catch(() => { }).finally(() => { if (MIS.p === pr) MIS.p = null; });
+  return pr;
+}
+function sahamConclusion(d) {
+  const P = v => (v >= 0 ? '+' : '') + v.toFixed(2).replace('.', ',') + '%', N = v => (+v).toLocaleString('id-ID', { maximumFractionDigits: 2 }), Rp = v => { v = Math.abs(v); return 'Rp ' + (v >= 1e12 ? (v / 1e12).toFixed(2).replace('.', ',') + ' T' : v >= 1e9 ? (v / 1e9).toFixed(1).replace('.', ',') + ' M' : Math.round(v / 1e6) + ' jt'); };
+  const pts = [], watch = []; let sc = 0;
+  if (d.ihsg && isFinite(d.ihsg.ch)) { const c = d.ihsg.ch, s = c >= 0.5 ? 1 : c <= -0.5 ? -1 : 0; sc += s; pts.push({ k: 'IHSG', ic: s > 0 ? '📈' : s < 0 ? '📉' : '➖', t: 'IHSG ' + N(d.ihsg.last) + ' (' + P(c) + ')' + (d.index && d.index.val > 0 ? ', nilai transaksi ' + Rp(d.index.val) : ''), s }); if (Math.abs(c) >= 2) watch.push('IHSG bergerak ' + P(c) + ' dalam sehari: volatilitas tinggi'); }
+  const m = d.market; if (m && m.up + m.down > 0) { const r = m.up / (m.up + m.down), s = r >= 0.55 ? 1 : r <= 0.45 ? -1 : 0; sc += s * 0.5; pts.push({ k: 'Breadth', ic: '📊', t: m.up + ' saham naik, ' + m.down + ' turun, ' + m.flat + ' tetap' + (m.est ? ' (perkiraan dari saham utama)' : ''), s }); }
+  if (m && (m.fbuy > 0 || m.fsell > 0) && isFinite(m.fnet)) { const s = m.fnet > 0 ? 1 : m.fnet < 0 ? -1 : 0; sc += s; pts.push({ k: 'Asing', ic: '🌏', t: 'Investor asing net ' + (m.fnet >= 0 ? 'beli ' : 'jual ') + Rp(m.fnet) + (d.foreignBuy && d.foreignBuy[0] ? '; beli terbesar ' + d.foreignBuy[0].code : '') + (d.foreignSell && d.foreignSell[0] ? ', jual terbesar ' + d.foreignSell[0].code : ''), s }); if (Math.abs(m.fnet) >= 1e12) watch.push('arus dana asing besar (' + (m.fnet > 0 ? 'masuk ' : 'keluar ') + Rp(m.fnet) + ')'); }
+  if (d.sectors && d.sectors.length) { const a = d.sectors, up = a.filter(x => x.ch > 0).length; pts.push({ k: 'Sektor', ic: '🧩', t: up + ' dari ' + a.length + ' sektor naik; terkuat ' + a[0].name + ' ' + P(a[0].ch) + ', terlemah ' + a[a.length - 1].name + ' ' + P(a[a.length - 1].ch), s: 0 }); }
+  if (d.global && d.global.length) { const a = d.global.filter(x => isFinite(x.ch)), avg = a.reduce((t, x) => t + x.ch, 0) / (a.length || 1), s = avg >= 0.5 ? 1 : avg <= -0.5 ? -1 : 0; sc += s * 0.5; pts.push({ k: 'Global', ic: '🌐', t: 'Rata-rata indeks utama dunia ' + P(avg) + ' (' + a.slice(0, 4).map(x => x.name + ' ' + P(x.ch)).join(', ') + ')', s }); }
+  const fx = (d.macro || []).find(x => x.sym === 'IDR=X'), vix = (d.macro || []).find(x => x.sym === '^VIX');
+  if (fx && isFinite(fx.ch)) { const s = fx.ch <= -0.3 ? 1 : fx.ch >= 0.3 ? -1 : 0; sc += s * 0.5; pts.push({ k: 'Rupiah', ic: '💱', t: 'USD/IDR ' + Math.round(fx.last).toLocaleString('id-ID') + ' (' + P(fx.ch) + ', rupiah ' + (fx.ch < 0 ? 'menguat' : fx.ch > 0 ? 'melemah' : 'stabil') + ')', s }); }
+  if (vix && vix.last >= 25) watch.push('VIX ' + N(vix.last) + ': kecemasan pasar global tinggi');
+  if (d.gainers && d.gainers[0]) pts.push({ k: 'Penggerak', ic: '🚀', t: 'Naik tertinggi ' + d.gainers.slice(0, 3).map(x => x.code + ' ' + P(x.pct || 0)).join(', ') + (d.losers && d.losers[0] ? '; turun terdalam ' + d.losers.slice(0, 2).map(x => x.code + ' ' + P(x.pct || 0)).join(', ') : ''), s: 0 });
+  if (d.news && d.news.length) pts.push({ k: 'Berita', ic: '📰', t: d.news.length + ' judul pasar modal; teratas: "' + String(d.news[0].title).slice(0, 90) + '"', s: 0 });
+  const score = Math.round(sc * 10) / 10, label = score > 0.5 ? 'Bullish' : score < -0.5 ? 'Bearish' : 'Sideways';
+  const pos = pts.filter(p => p.s > 0).map(p => p.k.toLowerCase()), neg = pts.filter(p => p.s < 0).map(p => p.k.toLowerCase());
+  const text = (score > 0.5 ? 'Data pasar saham cenderung mendukung kenaikan' : score < -0.5 ? 'Data pasar saham cenderung menekan IHSG' : 'Data pasar saham cenderung netral, IHSG bergerak mendatar') + (pos.length ? '; positif dari ' + pos.join(', ') : '') + (neg.length ? '; negatif dari ' + neg.join(', ') : '') + '.'
+    + (score < -0.5 ? ' Pertimbangkan ukuran posisi lebih kecil dan disiplin batas rugi.' : score > 0.5 ? ' Tetap pasang batas rugi: arah bisa berbalik cepat.' : ' Tunggu konfirmasi arah sebelum menambah posisi besar.');
+  return { score, label, text, pts, watch: watch.slice(0, 4) };
 }
 
 // Kesimpulan Utama: merangkum seluruh bagian laporan (pasar, sentimen, derivatif, whale, aset besar, narasi, tren, makro, berita)
@@ -2365,6 +2501,7 @@ function miConclusion(d, sc0) {
     if (oc != null && oc >= 5) watch.push('open interest BTC naik ' + P(oc) + ': leverage menumpuk, volatilitas bisa membesar');
     sc += s * 0.5; pts.push({ k: 'Derivatif', ic: '⚖️', t: 'BTC' + (oc != null ? ' OI ' + P(oc) : '') + (f != null ? ', funding ' + (f >= 0 ? '+' : '') + f.toFixed(4).replace('.', ',') + '%' : '') + (lr != null ? ', akun long ' + lr.toFixed(0) + '%' : '') + (d.liq && d.liq.all ? ', likuidasi 24j ' + U(d.liq.all.total) : ''), s }); }
   if (d.whale && d.whale.rows && d.whale.rows.length) { const tot = d.whale.rows.reduce((a, r) => a + (r.usd || 0), 0); pts.push({ k: 'Whale', ic: '🐋', t: d.whale.rows.length + ' transfer besar 24 jam, total ' + U(tot), s: 0 }); }
+  else if (d.chain && d.chain.big && d.chain.big.length) pts.push({ k: 'Whale', ic: '🐋', t: d.chain.big.length + ' transfer BTC ≥ 50 BTC menunggu konfirmasi, terbesar ' + Math.round(d.chain.big[0].btc).toLocaleString('id-ID') + ' BTC' + (d.treasury ? '; perusahaan publik memegang ' + Math.round(d.treasury.total).toLocaleString('id-ID') + ' BTC' : ''), s: 0 });
   else if (d.treasury) pts.push({ k: 'Whale', ic: '🏦', t: 'Perusahaan publik memegang ' + Math.round(d.treasury.total).toLocaleString('id-ID') + ' BTC (' + (d.treasury.pct || 0).toFixed(2).replace('.', ',') + '% supply)', s: 0 });
   if (d.gn && isFinite(d.gn.netflow)) { const s = d.gn.netflow < 0 ? 1 : d.gn.netflow > 0 ? -1 : 0; sc += s * 0.5; pts.push({ k: 'On-chain', ic: '⛓️', t: 'Arus bersih BTC ke exchange ' + (d.gn.netflow >= 0 ? '+' : '') + Math.round(d.gn.netflow).toLocaleString('id-ID') + ' BTC (' + (s > 0 ? 'keluar dari exchange, cenderung akumulasi' : 'masuk ke exchange, potensi jual') + ')', s }); }
   if (d.top && d.top.length) { const up = d.top.filter(c => c.ch24 > 0).length, b = d.top.slice().sort((x, y) => (y.ch24 || 0) - (x.ch24 || 0)); const s = up >= 7 ? 1 : up <= 3 ? -1 : 0; sc += s * 0.5; pts.push({ k: '10 aset besar', ic: '🏆', t: up + ' dari ' + d.top.length + ' naik; terkuat ' + b[0].sym + ' ' + P(b[0].ch24 || 0) + ', terlemah ' + b[b.length - 1].sym + ' ' + P(b[b.length - 1].ch24 || 0), s }); }
@@ -2372,10 +2509,10 @@ function miConclusion(d, sc0) {
   if (d.trend && d.trend.length) pts.push({ k: 'Tren', ic: '🔥', t: 'Paling dicari: ' + d.trend.slice(0, 3).map(x => x.sym).join(', ') + (d.idx && d.idx.vol && d.idx.vol[0] ? '; volume terbesar Indodax: ' + d.idx.vol[0].sym : ''), s: 0 });
   if (d.stable && isFinite(d.stable.ch24)) { const s = d.stable.ch24 >= 0.2 ? 1 : d.stable.ch24 <= -0.2 ? -1 : 0; sc += s; pts.push({ k: 'Likuiditas', ic: '💧', t: 'Pasokan stablecoin ' + U(d.stable.mcap) + ' (' + P(d.stable.ch24) + ')' + (d.ethbtc && d.ethbtc.ch7 != null ? ', ETH/BTC 7 hari ' + P(d.ethbtc.ch7) : '') + (d.idx && d.idx.usdIdr ? ', USDT/IDR ' + Math.round(d.idx.usdIdr).toLocaleString('id-ID') : ''), s }); }
   if (d.news && d.news.length) pts.push({ k: 'Berita', ic: '📰', t: d.news.length + ' judul hari ini; teratas: "' + String(d.news[0].title).slice(0, 90) + '"', s: 0 });
-  const score = Math.round(sc * 10) / 10, label = score >= 2 ? 'Angin pendukung' : score <= -2 ? 'Angin lawan' : score > 0.5 ? 'Cenderung positif' : score < -0.5 ? 'Cenderung negatif' : 'Campuran';
+  const score = Math.round(sc * 10) / 10, label = score > 0.5 ? 'Bullish' : score < -0.5 ? 'Bearish' : 'Sideways'; // cenderung baik / buruk / netral
   const pos = pts.filter(p => p.s > 0).map(p => p.k.toLowerCase()), neg = pts.filter(p => p.s < 0).map(p => p.k.toLowerCase());
-  const text = (score >= 2 ? 'Mayoritas data mendukung kenaikan' : score <= -2 ? 'Mayoritas data menekan pasar' : 'Data belum searah') + (pos.length ? '; positif dari ' + pos.join(', ') : '') + (neg.length ? '; negatif dari ' + neg.join(', ') : '') + '.'
-    + (score <= -2 ? ' Pertimbangkan ukuran posisi lebih kecil dan stop loss lebih disiplin.' : score >= 2 ? ' Tetap pakai stop loss: kondisi bisa berbalik cepat.' : ' Tunggu konfirmasi arah sebelum menambah posisi besar.');
+  const text = (score >= 2 ? 'Mayoritas data mendukung kenaikan' : score > 0.5 ? 'Data cenderung mendukung kenaikan' : score <= -2 ? 'Mayoritas data menekan pasar' : score < -0.5 ? 'Data cenderung menekan pasar' : 'Data cenderung netral, pasar bergerak mendatar') + (pos.length ? '; positif dari ' + pos.join(', ') : '') + (neg.length ? '; negatif dari ' + neg.join(', ') : '') + '.'
+    + (score < -0.5 ? ' Pertimbangkan ukuran posisi lebih kecil dan stop loss lebih disiplin.' : score > 0.5 ? ' Tetap pakai stop loss: kondisi bisa berbalik cepat.' : ' Tunggu konfirmasi arah sebelum menambah posisi besar.');
   return { score, label, text, pts, watch: watch.slice(0, 4) };
 }
 
@@ -2387,7 +2524,7 @@ function view() {
   rollDay();
   return { license: LIC.status(), buyUrl: E.LICENSE_BUY_URL || '', live: LIVE, wantLive: CFG.live, hasKey: !!(CFG.key && CFG.secret), settings: S.settings, pair: P(), price: M.price, ch24: M.ch24, wsOk: M.wsOk, src: M.src,
     paper: LIVE ? null : S.paper, liveBal: LIVE ? L : null, positions: S.positions, orders: S.orders, history: S.history.slice(0, 50), totalPnl: S.totalPnl, dayPnl: S.dayPnl,
-    limits: { maxOrder: null, dailyLoss: CFG.dailyLoss }, usdIdr: M.usdIdr || null, fut: { maxLev: FUT_MAX_LEV, fee: FUT_FEE, mmr: FUT_MMR }, signal: lastSignal, sigWhy: BOT.why, botTf: BOT.tf, botReady: BOT.candles.length > 0, strategies: STRATS, alerts: ALERTS, tfs: Object.keys(TF_SEC), provider: 'indodax', apiVer: LIVE ? API_VER : null, links: linkView(), xtrades: (S.xtrades || []).slice(0, 30) };
+    limits: { maxOrder: null, dailyLoss: CFG.dailyLoss }, usdIdr: M.usdIdr || null, fut: { maxLev: FUT_MAX_LEV, fee: FUT_FEE, mmr: FUT_MMR }, signal: lastSignal, sigWhy: BOT.why, botTf: BOT.tf, botReady: BOT.candles.length > 0, strategies: STRATS, alerts: ALERTS, tfs: Object.keys(TF_SEC), provider: 'indodax', chartSrc: CH_SRC.includes(S.settings.chartSrc) ? S.settings.chartSrc : 'auto', chartUsed: M.chSrc || null, apiVer: LIVE ? API_VER : null, links: linkView(), xtrades: (S.xtrades || []).slice(0, 30) };
 }
 function pushState() { broadcast({ t: 'state', s: view() }); }
 
@@ -2437,6 +2574,16 @@ const ACCTS = new Map(); // akun dari env: nama -> {salt, hash}
   if (ACCTS.size) AUTH = { user: [...ACCTS.keys()][0], salt: '', hash: '', created: Date.now(), env: true }; }
 const userOk = u => /^[A-Za-z0-9._-]{3,32}$/.test(String(u || ''));
 function checkPw(user, pw) { if (ACCTS.size) { const a = ACCTS.get(String(user || '').trim()); if (!a) return false; return crypto.timingSafeEqual(Buffer.from(pwHash(pw, a.salt), 'hex'), Buffer.from(a.hash, 'hex')); } if (!AUTH) return false; const h = pwHash(pw, AUTH.salt); return user === AUTH.user && crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(AUTH.hash, 'hex')); }
+// ---------- Profil klien per akun (nama tampilan, status, warna avatar, foto) ----------
+// Disimpan di data/profiles.json dan juga di browser klien; bila disk server terhapus (hosting gratis), browser mengirim ulang.
+const PROF_FILE = path.join(CFG.dataDir, 'profiles.json'), PROF_COLORS = ['violet', 'ocean', 'emerald', 'sunset', 'rose', 'gold'];
+let PROFS = {}; try { const j = JSON.parse(fs.readFileSync(PROF_FILE, 'utf8')); if (j && typeof j === 'object') PROFS = j; } catch (e) { }
+function saveProfs() { try { fs.writeFileSync(PROF_FILE + '.tmp', JSON.stringify(PROFS)); fs.renameSync(PROF_FILE + '.tmp', PROF_FILE); } catch (e) { } }
+function profClean(b) {
+  const tx = (v, n) => String(v || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, n), im = String(b.img || '');
+  if (im && (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(im) || im.length > 150000)) throw new Error('Foto tidak valid atau terlalu besar');
+  return { name: tx(b.name, 24), tag: tx(b.tag, 40), color: PROF_COLORS.includes(b.color) ? b.color : 'violet', img: im, at: Math.min(Date.now(), +b.at || Date.now()) };
+}
 // file statis yang boleh dibuka tanpa login (layar login, aplikasi terpasang/PWA)
 const STATIC = { '/ind.js': 'application/javascript', '/i18n.js': 'application/javascript', '/sw.js': 'application/javascript', '/manifest.webmanifest': 'application/manifest+json', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/icon-maskable.png': 'image/png' };
 const srv = http.createServer(async (req, res) => {
@@ -2474,6 +2621,7 @@ const srv = http.createServer(async (req, res) => {
     }
     if (!AUTH && u.pathname.startsWith('/api/')) return send(res, 401, { error: 'Buat akun dulu', auth: true, setup: true });
     if (AUTH && u.pathname.startsWith('/api/') && !sessOf(req)) return send(res, 401, { error: 'Perlu masuk (login) dulu', auth: true });
+    if (EDITION === 'basic' && u.pathname === '/api/mi' && u.searchParams.get('kind') === 'saham') return send(res, 403, { error: 'Laporan Market Intelligence saham tersedia di paket Pro dan Max.', edition: 'basic' });
     if (EDITION === 'basic' && BASIC_BLOCK.test(u.pathname)) return send(res, 403, { error: 'Trading manual dan bot tidak tersedia di paket Basic. Upgrade ke Pro atau Max.', edition: 'basic' });
     if (req.method === 'GET' && u.pathname === '/api/stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -2532,13 +2680,14 @@ const srv = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/api/assets') {
       try { return send(res, 200, { cat: u.searchParams.get('cat'), list: await assetList(String(u.searchParams.get('cat') || ''), u.searchParams.get('q')) }); } catch (e) { return send(res, 502, { error: shortErr(e) }); }
     }
+    if (req.method === 'GET' && u.pathname === '/api/profile') { const se = sessOf(req), k = se ? se.user : 'local'; return send(res, 200, { user: k, env: !!(AUTH && AUTH.env), prof: PROFS[k] || null }); }
     if (req.method === 'GET' && u.pathname === '/api/quota') return send(res, 200, quotaView((sessOf(req) || {}).user || 'local', EDITION));
     if (req.method === 'GET' && (u.pathname === '/api/mi' || u.pathname === '/api/research' || u.pathname === '/api/ii/value')) {
       try { req.qBack = quotaTake((sessOf(req) || {}).user || 'local', EDITION, u.pathname === '/api/mi' ? 'mi' : u.pathname === '/api/research' ? 'rd' : 'ii'); } catch (e) { return send(res, 429, { error: e.message, quota: true }); }
     }
     if (req.method === 'GET' && u.pathname === '/api/ii/value') { try { return send(res, 200, await cached('ii:value', 10 * 60e3, iiValue)); } catch (e) { if (req.qBack) req.qBack(); return send(res, 502, { error: shortErr(e) }); } }
     if (req.method === 'GET' && u.pathname === '/api/mi') {
-      try { return send(res, 200, await marketIntel(u.searchParams.get('fresh') === '1')); } catch (e) { if (req.qBack) req.qBack(); return send(res, 502, { error: e.message }); }
+      try { const fr = u.searchParams.get('fresh') === '1'; return send(res, 200, u.searchParams.get('kind') === 'saham' ? await marketIntelSaham(fr) : await marketIntel(fr)); } catch (e) { if (req.qBack) req.qBack(); return send(res, 502, { error: e.message }); }
     }
     if (req.method === 'GET' && u.pathname === '/api/research') {
       const pair = String(u.searchParams.get('pair') || S.settings.pair);
@@ -2560,6 +2709,7 @@ const srv = http.createServer(async (req, res) => {
     if (req.method !== 'POST') { res.writeHead(404); return res.end('Not found'); }
     if (req.headers['x-tradebot'] !== '1') return send(res, 403, { error: 'Ditolak' }); // cegah CSRF dari situs lain
     const b = await readBody(req);
+    if (u.pathname === '/api/profile') { const se = sessOf(req), k = se ? se.user : 'local'; if (b.reset) { delete PROFS[k]; saveProfs(); return send(res, 200, { ok: true, prof: null }); } let o; try { o = profClean(b); } catch (e) { return send(res, 400, { error: e.message }); } PROFS[k] = o; saveProfs(); return send(res, 200, { ok: true, prof: o }); }
     if (u.pathname === '/api/order') { const f = b.market === 'futures'; const p = await openPos({ idr: b.idr, sl: b.sl, tp: b.tp, isBot: false, ...(f ? { market: 'futures', side: b.side, lev: b.lev, mm: b.mm } : {}) }); return send(res, 200, { ok: true, id: p.id }); }
     if (u.pathname === '/api/sell') { const r = await sellNow(b); return send(res, 200, { ok: true, ...r }); }
     if (u.pathname === '/api/close') { await closePos(String(b.id || ''), 'Manual'); return send(res, 200, { ok: true }); }
@@ -2681,7 +2831,8 @@ const srv = http.createServer(async (req, res) => {
       const o = normProp(b, cur); if (cur) Object.assign(cur, o); else PROPS.unshift(o); savePropFile(); return send(res, 200, { ok: true, item: o, list: PROPS }); }
     if (u.pathname === '/api/prop/del') { const n = PROPS.length; PROPS = PROPS.filter(x => x.id !== b.id); if (PROPS.length === n) throw new Error('Listing tidak ditemukan'); savePropFile(); return send(res, 200, { ok: true, list: PROPS }); }
     if (u.pathname === '/api/settings') {
-      const st = S.settings, oldPair = st.pair, oldTf = st.tf;
+      const st = S.settings, oldPair = st.pair, oldTf = st.tf, oldCs = st.chartSrc || 'auto';
+      if (b.chartSrc != null) { if (!CH_SRC.includes(b.chartSrc)) throw new Error('Sumber chart tidak dikenal'); st.chartSrc = b.chartSrc; }
       const oldMv = st.mainView || null;
       if (b.mainView !== undefined) { if (b.mainView === null || b.mainView === '') st.mainView = null; else { const mv = String(b.mainView); if (!extOf(mv)) throw new Error('Aset tidak dikenal'); st.mainView = mv; } }
       if (b.pair != null && b.pair === st.pair && b.mainView === undefined) st.mainView = null;
@@ -2727,7 +2878,8 @@ const srv = http.createServer(async (req, res) => {
       }
       save();
       const reBot = st.strategy !== oldStrat || st.bot.cfg[st.strategy].tf !== oldBotTf;
-      if (st.pair !== oldPair || st.tf !== oldTf || (st.mainView || null) !== oldMv) { M.ch24 = null; M.ref24 = 0; await loadHistory(); if (st.pair !== oldPair) wsResub(oldPair); await botLoad(true); broadcast({ t: 'snap', s: view(), candles: M.candles.slice(-300), cur: M.cur }); }
+      if ((st.chartSrc || 'auto') !== oldCs) { for (const k of Object.keys(XW)) delete XW[k]; for (const k of Object.keys(histCache)) delete histCache[k]; }
+      if (st.pair !== oldPair || st.tf !== oldTf || (st.mainView || null) !== oldMv || (st.chartSrc || 'auto') !== oldCs) { M.ch24 = null; M.ref24 = 0; await loadHistory(); if (st.pair !== oldPair) wsResub(oldPair); await botLoad(true); broadcast({ t: 'snap', s: view(), candles: M.candles.slice(-300), cur: M.cur }); }
       else { if (reBot) await botLoad(true); else if (b.ind != null || b.bot != null || b.strategy != null || b.fibDraw !== undefined || b.botSl != null) botRefresh(); pushState(); }
       return send(res, 200, { ok: true });
     }
